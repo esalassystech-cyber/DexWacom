@@ -1,5 +1,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-0.3.0-blue?style=for-the-badge" alt="Versión">
+  <img src="https://img.shields.io/badge/license-MIT-brightgreen?style=for-the-badge" alt="Licencia">
   <img src="https://img.shields.io/badge/estado-beta-orange?style=for-the-badge" alt="Estado">
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=for-the-badge&logo=dotnet&logoColor=white" alt=".NET 10">
   <img src="https://img.shields.io/badge/WPF-Windows%2011%20x64-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="WPF · Windows 11">
@@ -298,8 +299,10 @@ DexWacom/
 ## 📄 Licencia
 
 ```text
-Copyright (c) 2026 DEXA Panamá (Eric Salas). Todos los derechos reservados.
+MIT License — Copyright (c) 2026 DEXA Panamá (Eric Salas)
 ```
+
+Ver [LICENSE](LICENSE) para el texto completo.
 
 ---
 
