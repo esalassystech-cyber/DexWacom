@@ -43,6 +43,150 @@ public sealed class BoardSurfaceInputTests
     }
 
     [Fact]
+    public void OnceWinTabDeliversPacketsWindowsInkPenNoLongerDrawsButMouseDoes()
+    {
+        OnSta(() =>
+        {
+            var surface = CreateSurface();
+            surface.SetMappedInputActive(true);
+            surface.SetWintabInputObserved(true);
+
+            Assert.False(surface.HandlePointerSample(new Point(20, 25), .4, true, 0, PointerInputSource.WpfPen));
+            Assert.False(surface.HandlePointerSample(new Point(20, 25), .4, true, 0, PointerInputSource.PromotedPenMouse));
+            Assert.Empty(surface.Document.FreehandStrokes);
+
+            Assert.True(surface.HandlePointerSample(new Point(30, 35), .5, true, 0, PointerInputSource.Mouse));
+            Assert.True(surface.HandlePointerSample(new Point(60, 65), 0, false, 0, PointerInputSource.Mouse));
+            Assert.Single(surface.Document.FreehandStrokes);
+        });
+    }
+
+    [Fact]
+    public void MainWindowMarkupLoads()
+    {
+        OnSta(() =>
+        {
+            var window = new MainWindow();
+            Assert.NotNull(window.Content);
+            window.Close();
+        });
+    }
+
+    [Fact]
+    public void HandToolMovesTheCanvasSoLaterInkLandsFurtherDown()
+    {
+        OnSta(() =>
+        {
+            var surface = CreateSurface();
+            surface.Tool = BoardTool.Pan;
+            surface.HandlePenSample(new Point(100, 200), .5, true, 0);
+            surface.HandlePenSample(new Point(100, 100), .5, true, 0); // drag up: the view scrolls down 100
+            surface.HandlePenSample(new Point(100, 100), 0, false, 0);
+            Assert.Empty(surface.Document.FreehandStrokes);
+
+            surface.Tool = BoardTool.Draw;
+            surface.HandlePenSample(new Point(50, 50), .5, true, 0);
+            surface.HandlePenSample(new Point(50, 50), 0, false, 0);
+            Assert.Equal(150, surface.Document.FreehandStrokes.Single().Points[0].Y);
+
+            surface.ResetView();
+            surface.HandlePenSample(new Point(60, 60), .5, true, 0);
+            surface.HandlePenSample(new Point(60, 60), 0, false, 0);
+            Assert.Equal(60, surface.Document.FreehandStrokes[^1].Points[0].Y);
+        });
+    }
+
+    [Fact]
+    public void HoldingSpacePansWithoutDrawing()
+    {
+        OnSta(() =>
+        {
+            var surface = CreateSurface();
+            surface.TemporaryPan = true;
+            surface.HandlePenSample(new Point(100, 100), .5, true, 0);
+            surface.HandlePenSample(new Point(100, 160), .5, true, 0);
+            surface.HandlePenSample(new Point(100, 160), 0, false, 0);
+            surface.TemporaryPan = false;
+
+            Assert.Empty(surface.Document.FreehandStrokes);
+            surface.HandlePenSample(new Point(10, 70), .5, true, 0);
+            surface.HandlePenSample(new Point(10, 70), 0, false, 0);
+            Assert.Equal(10, surface.Document.FreehandStrokes.Single().Points[0].Y);
+        });
+    }
+
+    [Fact]
+    public void UndoRemovesTheLastStrokeAndRedoBringsItBack()
+    {
+        OnSta(() =>
+        {
+            var surface = CreateSurface();
+            surface.HandlePenSample(new Point(30, 40), .5, true, 0);
+            surface.HandlePenSample(new Point(80, 90), .5, true, 0);
+            surface.HandlePenSample(new Point(80, 90), 0, false, 0);
+            Assert.Single(surface.Document.FreehandStrokes);
+
+            Assert.True(surface.Undo());
+            Assert.Empty(surface.Document.FreehandStrokes);
+            Assert.True(surface.Redo());
+            Assert.Single(surface.Document.FreehandStrokes);
+            Assert.True(surface.Undo());
+            Assert.False(surface.Undo());
+        });
+    }
+
+    [Fact]
+    public void EraserToolRemovesTouchedStrokeAsOneUndoStep()
+    {
+        OnSta(() =>
+        {
+            var surface = CreateSurface();
+            surface.HandlePenSample(new Point(20, 50), .5, true, 0);
+            surface.HandlePenSample(new Point(200, 50), .5, true, 0);
+            surface.HandlePenSample(new Point(200, 50), 0, false, 0);
+
+            surface.Tool = BoardTool.Erase;
+            surface.HandlePenSample(new Point(100, 45), .5, true, 0);
+            surface.HandlePenSample(new Point(110, 55), .5, true, 0);
+            surface.HandlePenSample(new Point(110, 55), 0, false, 0);
+
+            Assert.Empty(surface.Document.FreehandStrokes);
+            Assert.True(surface.Undo());
+            Assert.Single(surface.Document.FreehandStrokes);
+        });
+    }
+
+    [Fact]
+    public void DeleteWithoutSelectionReportsNothingRemoved()
+    {
+        OnSta(() =>
+        {
+            var surface = CreateSurface();
+            Assert.False(surface.DeleteSelected());
+
+            surface.AddShape(WorkflowShapeKind.Terminal);
+            Assert.True(surface.DeleteSelected());
+            Assert.Empty(surface.Document.Elements);
+        });
+    }
+
+    [Fact]
+    public void WinTabTipTakesOverAContactAnotherSourceLeftOpen()
+    {
+        OnSta(() =>
+        {
+            var surface = CreateSurface();
+            Assert.True(surface.HandlePointerSample(new Point(10, 10), .5, true, 0, PointerInputSource.Mouse)); // its release never arrives
+
+            Assert.True(surface.HandlePointerSample(new Point(100, 120), .6, true, 0, PointerInputSource.WinTab));
+            Assert.True(surface.HandlePointerSample(new Point(150, 160), .6, true, 0, PointerInputSource.WinTab));
+            Assert.True(surface.HandlePointerSample(new Point(150, 160), 0, false, 0, PointerInputSource.WinTab));
+
+            Assert.Contains(surface.Document.FreehandStrokes, s => s.Points.Count == 3 && s.Points[^1].X == 150);
+        });
+    }
+
+    [Fact]
     public void PromotedPenMouseCanDrawWhenNoStylusSequenceWasDelivered()
     {
         OnSta(() =>

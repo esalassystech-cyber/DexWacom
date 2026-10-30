@@ -6,7 +6,7 @@ using Pizarra.Core;
 
 namespace Pizarra.App;
 
-public enum BoardTool { Draw, Select, Connect }
+public enum BoardTool { Draw, Select, Connect, Erase, Pan }
 
 /// <summary>Board renderer and input surface. StylusDown/Move/Up are kept as distinct events so lifted strokes never join.</summary>
 public sealed class BoardSurface : FrameworkElement
@@ -30,7 +30,10 @@ public sealed class BoardSurface : FrameworkElement
     private bool _pointerDragging;
     private bool _isPanning;
     private bool _wintabInputObserved;
+    private bool _mappedInputActive;
     private bool _penTipDown;
+    private bool _eraseCheckpointTaken;
+    private Point? _panAnchor;
     private uint _lastPenButtons;
     private readonly List<Guid> _pendingConnector = [];
 
@@ -50,15 +53,13 @@ public sealed class BoardSurface : FrameworkElement
         MouseMove += OnMouseMove;
         MouseUp += OnMouseUp;
         SizeChanged += (_, _) => UpdateClipBounds();
+        // Wheel scrolls (Shift: sideways); Ctrl+wheel zooms around the pointer.
         PreviewMouseWheel += (_, e) =>
         {
-            var point = e.GetPosition(this);
-            var oldZoom = _transform.Zoom;
-            var nextZoom = Math.Clamp(oldZoom * (e.Delta > 0 ? 1.12 : 1 / 1.12), .25, 4);
-            _transform = new CanvasTransform(nextZoom,
-                point.X - (point.X - _transform.PanX) * nextZoom / oldZoom,
-                point.Y - (point.Y - _transform.PanY) * nextZoom / oldZoom);
-            InvalidateVisual();
+            if ((Keyboard.Modifiers & ModifierKeys.Control) != 0)
+                ZoomAt(e.GetPosition(this), e.Delta > 0 ? 1.12 : 1 / 1.12);
+            else if ((Keyboard.Modifiers & ModifierKeys.Shift) != 0) PanBy(e.Delta * .6, 0);
+            else PanBy(0, e.Delta * .6);
             e.Handled = true;
         };
         Loaded += (_, _) => UpdateClipBounds();
@@ -94,38 +95,92 @@ public sealed class BoardSurface : FrameworkElement
     {
         var center = ToWorld(new Point(ActualWidth / 2, ActualHeight / 2));
         var offset = _document.Elements.Count * 22;
+        var (label, width, height) = kind switch
+        {
+            WorkflowShapeKind.Decision => ("¿Decisión?", 190.0, 120.0),
+            WorkflowShapeKind.Terminal => ("Inicio", 170.0, 70.0),
+            WorkflowShapeKind.InputOutput => ("Entrada / salida", 200.0, 95.0),
+            _ => ("Nuevo proceso", 190.0, 105.0)
+        };
         Add(new WorkflowShape
         {
             Kind = kind,
-            Label = kind == WorkflowShapeKind.Process ? "Nuevo proceso" : "¿Decisión?",
-            X = center.X - 95 + offset,
-            Y = center.Y - 52 + offset,
-            Width = 190,
-            Height = 105
+            Label = label,
+            X = center.X - width / 2 + offset,
+            Y = center.Y - height / 2 + offset,
+            Width = width,
+            Height = height
         });
     }
 
-    public void Undo()
+    /// <summary>While true (Space held) the pen moves the canvas whatever the selected tool is.</summary>
+    public bool TemporaryPan
+    {
+        get => _temporaryPan;
+        set
+        {
+            if (value == _temporaryPan) return;
+            if (value) { FinishStroke(); _pointerDragging = false; }
+            _temporaryPan = value;
+            _panAnchor = null;
+        }
+    }
+    private bool _temporaryPan;
+
+    public void PanBy(double dx, double dy)
+    {
+        _transform = new CanvasTransform(_transform.Zoom, _transform.PanX + dx, _transform.PanY + dy);
+        InvalidateVisual();
+    }
+
+    public void ZoomAt(Point surfacePoint, double factor)
+    {
+        var oldZoom = _transform.Zoom;
+        var nextZoom = Math.Clamp(oldZoom * factor, .25, 4);
+        _transform = new CanvasTransform(nextZoom,
+            surfacePoint.X - (surfacePoint.X - _transform.PanX) * nextZoom / oldZoom,
+            surfacePoint.Y - (surfacePoint.Y - _transform.PanY) * nextZoom / oldZoom);
+        InvalidateVisual();
+    }
+
+    public void ZoomAtCenter(double factor) => ZoomAt(new Point(ActualWidth / 2, ActualHeight / 2), factor);
+
+    /// <summary>Back to the board's origin at 100 %.</summary>
+    public void ResetView()
+    {
+        _transform = new CanvasTransform(1, 0, 0);
+        InvalidateVisual();
+    }
+
+    public bool CanUndo => _undo.Count > 0 || _strokeBuilder.IsActive;
+    public bool CanRedo => _redo.Count > 0;
+    public bool HasSelection => _selected is Guid id && _document.Elements.Any(x => x.Id == id);
+
+    public bool Undo()
     {
         FinishStroke();
-        if (_undo.Count == 0) return;
+        if (_undo.Count == 0) return false;
         _redo.Push(Clone(_document));
         _document = _undo.Pop();
+        _pendingConnector.Clear();
         RefreshAfterEdit();
+        return true;
     }
 
-    public void Redo()
+    public bool Redo()
     {
         FinishStroke();
-        if (_redo.Count == 0) return;
+        if (_redo.Count == 0) return false;
         _undo.Push(Clone(_document));
         _document = _redo.Pop();
+        _pendingConnector.Clear();
         RefreshAfterEdit();
+        return true;
     }
 
-    public void DeleteSelected()
+    public bool DeleteSelected()
     {
-        if (_selected is not Guid id) return;
+        if (_selected is not Guid id || !_document.Elements.Any(x => x.Id == id)) return false;
         FinishStroke();
         Checkpoint();
         _document = _document with
@@ -135,6 +190,39 @@ public sealed class BoardSurface : FrameworkElement
         };
         _selected = null;
         RefreshAfterEdit();
+        return true;
+    }
+
+    /// <summary>Text currently shown by the selected block, for the inline editor.</summary>
+    public string? SelectedText => _document.Elements.FirstOrDefault(x => x.Id == _selected) switch
+    {
+        StickyNote note => note.Text,
+        WorkflowShape shape => shape.Label,
+        _ => null
+    };
+
+    /// <summary>Renames the open board in memory; the caller moves the file.</summary>
+    public void SetDocumentName(string name, string? newFilePath)
+    {
+        FinishStroke();
+        _document = _document with { Name = name };
+        if (newFilePath is not null) _filePath = newFilePath;
+        Changed?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>Forgets the open board without saving it, used after the board's file was deleted.</summary>
+    public void CloseDocument()
+    {
+        FinishStroke();
+        _saveTimer.Stop();
+        _document = new BoardDocument();
+        _filePath = null;
+        _selected = null;
+        _undo.Clear();
+        _redo.Clear();
+        _pendingConnector.Clear();
+        InvalidateVisual();
+        Changed?.Invoke(this, EventArgs.Empty);
     }
 
     public void EditSelected(string text)
@@ -160,6 +248,7 @@ public sealed class BoardSurface : FrameworkElement
 
     public void SetMappedInputActive(bool active)
     {
+        _mappedInputActive = active;
         if (!active) ReleaseInput(CursorReleaseReason.TabletDisconnected);
         if (!active) _wintabInputObserved = false;
     }
@@ -170,6 +259,17 @@ public sealed class BoardSurface : FrameworkElement
     {
         if (!active) ReleaseInput(CursorReleaseReason.Deactivated);
     }
+
+    public bool IsCursorConfined => _confinement.IsConfined;
+
+    /// <summary>Holds the cursor inside the window's client area (ClipCursor) while the mapped pen is in use.</summary>
+    public void ConfineCursor(bool confine)
+    {
+        if (!confine) { _confinement.Release(CursorReleaseReason.Deactivated); return; }
+        _confinement.ActivateBoard(WindowScreenBounds(), _mappedInputActive);
+    }
+
+    public void RefreshCursorBounds() => UpdateClipBounds();
 
     public void ReleaseInput(CursorReleaseReason reason)
     {
@@ -212,14 +312,18 @@ public sealed class BoardSurface : FrameworkElement
         foreach (var stroke in _document.FreehandStrokes) DrawFreeStroke(dc, stroke);
         if (_activeNoteId is null && _strokeBuilder.IsActive) DrawFreeStroke(dc, new InkStroke { Points = [.. _strokeBuilder.Points] });
 
+        var arrowBrush = new SolidColorBrush(Color.FromRgb(139, 156, 255));
+        var arrowPen = new Pen(arrowBrush, 2.5) { StartLineCap = PenLineCap.Round };
         foreach (var connector in _document.Connectors)
         {
             var from = _document.Elements.FirstOrDefault(x => x.Id == connector.FromElementId);
             var to = _document.Elements.FirstOrDefault(x => x.Id == connector.ToElementId);
             if (from is null || to is null) continue;
-            var arrowPen = new Pen(new SolidColorBrush(Color.FromRgb(139, 156, 255)), 2.5) { EndLineCap = PenLineCap.Triangle };
-            dc.DrawLine(arrowPen, Center(from), Center(to));
+            DrawArrow(dc, arrowPen, arrowBrush, EdgePoint(from, Center(to)), EdgePoint(to, Center(from)));
         }
+        if (_pendingConnector.Count == 1 && _document.Elements.FirstOrDefault(x => x.Id == _pendingConnector[0]) is { } pending)
+            dc.DrawRoundedRectangle(null, new Pen(arrowBrush, 2) { DashStyle = DashStyles.Dash },
+                new Rect(pending.X - 6, pending.Y - 6, pending.Width + 12, pending.Height + 12), 10, 10);
 
         foreach (var element in _document.Elements)
         {
@@ -242,20 +346,21 @@ public sealed class BoardSurface : FrameworkElement
                 var fill = new SolidColorBrush(Color.FromRgb(33, 47, 75));
                 var outline = new Pen(selected ? Brushes.White : new SolidColorBrush(Color.FromRgb(129, 148, 197)), selected ? 2.5 : 1.5);
                 if (shape.Kind == WorkflowShapeKind.Decision)
+                    dc.DrawGeometry(fill, outline, Polygon(
+                        new Point(rect.X + rect.Width / 2, rect.Y), new Point(rect.Right, rect.Y + rect.Height / 2),
+                        new Point(rect.X + rect.Width / 2, rect.Bottom), new Point(rect.X, rect.Y + rect.Height / 2)));
+                else if (shape.Kind == WorkflowShapeKind.InputOutput)
                 {
-                    var geometry = new StreamGeometry();
-                    using (var context = geometry.Open())
-                    {
-                        context.BeginFigure(new Point(rect.X + rect.Width / 2, rect.Y), true, true);
-                        context.LineTo(new Point(rect.Right, rect.Y + rect.Height / 2), true, false);
-                        context.LineTo(new Point(rect.X + rect.Width / 2, rect.Bottom), true, false);
-                        context.LineTo(new Point(rect.X, rect.Y + rect.Height / 2), true, false);
-                    }
-                    geometry.Freeze();
-                    dc.DrawGeometry(fill, outline, geometry);
+                    var slant = Math.Min(28, rect.Width / 5);
+                    dc.DrawGeometry(fill, outline, Polygon(
+                        new Point(rect.X + slant, rect.Y), new Point(rect.Right, rect.Y),
+                        new Point(rect.Right - slant, rect.Bottom), new Point(rect.X, rect.Bottom)));
                 }
+                else if (shape.Kind == WorkflowShapeKind.Terminal)
+                    dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(31, 66, 61)), outline, rect, rect.Height / 2, rect.Height / 2);
                 else dc.DrawRoundedRectangle(fill, outline, rect, 12, 12);
-                DrawText(dc, shape.Label, 14, Colors.White, new Point(rect.X + 10, rect.Y + rect.Height / 2 - 12), true, rect.Width - 20, 50, TextAlignment.Center);
+                var inset = shape.Kind == WorkflowShapeKind.Decision ? rect.Width / 5 : 10;
+                DrawText(dc, shape.Label, 14, Colors.White, new Point(rect.X + inset, rect.Y + rect.Height / 2 - 12), true, rect.Width - inset * 2, 50, TextAlignment.Center);
             }
         }
         dc.Pop();
@@ -338,7 +443,7 @@ public sealed class BoardSurface : FrameworkElement
             InvalidateVisual();
             return;
         }
-        if (e.LeftButton == MouseButtonState.Pressed && (_strokeBuilder.IsActive || _pointerDragging))
+        if (e.LeftButton == MouseButtonState.Pressed && (_strokeBuilder.IsActive || _pointerDragging || _panAnchor is not null))
             HandlePointerSample(e.GetPosition(this), .55, tipDown: true, buttons: 0, GetMouseSequenceSource(e));
     }
 
@@ -369,15 +474,41 @@ public sealed class BoardSurface : FrameworkElement
     public bool HandlePointerSample(Point surfacePoint, double pressure, bool tipDown, uint buttons,
         PointerInputSource source = PointerInputSource.Mouse)
     {
-        if (string.IsNullOrWhiteSpace(_filePath)) return false;
+        if (string.IsNullOrWhiteSpace(_filePath)) return Trace(source, surfacePoint, tipDown, false, "sin-tablero");
+        // Once WinTab delivers packets it is the only pen source: Windows Ink events follow the driver's
+        // desktop-wide mapping, not the window mapping, so mixing them puts strokes in two different places.
+        if (_wintabInputObserved && source is PointerInputSource.WpfPen or PointerInputSource.PromotedPenMouse) return Trace(source, surfacePoint, tipDown, false, "fuente-ignorada");
+        // The tablet's tip is the ground truth: a contact another source left open (a pen-made mouse button that
+        // never saw its release) would otherwise reject every WinTab packet until it ends.
+        if (source == PointerInputSource.WinTab && tipDown && _pointerInput.ContactSource is { } stale && stale != PointerInputSource.WinTab)
+        {
+            FinishStroke();
+            _pointerDragging = false;
+            _penTipDown = false;
+            _pointerInput.Cancel();
+            ReleaseMouseCapture();
+            Stylus.Capture(null);
+        }
         _lastPenPoint = surfacePoint;
         var inside = ContainsSurfacePoint(surfacePoint);
         var point = ClampToSurface(surfacePoint);
         var sideButtonDown = (buttons & ~1U & ~_lastPenButtons) != 0;
         if (inside && sideButtonDown) AddNoteAt(ToWorld(point), "");
+        var contactBefore = _pointerInput.ContactSource;
         var accepted = _pointerInput.Accept(source, tipDown);
         _lastPenButtons = buttons;
-        if (!accepted) return false;
+        if (!accepted) return Trace(source, surfacePoint, tipDown, false, contactBefore is null ? "en-el-aire" : $"contacto-de-{contactBefore}");
+        Trace(source, surfacePoint, tipDown, true, !tipDown ? "arriba" : inside ? "dentro" : "fuera-del-lienzo");
+
+        // Hand tool (or Space held): dragging moves the canvas, measured in unclamped surface points.
+        if (Tool == BoardTool.Pan || TemporaryPan)
+        {
+            if (tipDown && _penTipDown && _panAnchor is Point anchor) PanBy(surfacePoint.X - anchor.X, surfacePoint.Y - anchor.Y);
+            _panAnchor = tipDown ? surfacePoint : null;
+            _penTipDown = tipDown;
+            return true;
+        }
+        _panAnchor = null;
 
         if (tipDown && !_penTipDown)
         {
@@ -388,6 +519,7 @@ public sealed class BoardSurface : FrameworkElement
                 if (Tool == BoardTool.Draw) BeginStroke(world, pressure);
                 else if (Tool == BoardTool.Select) SelectAndStartMove(world);
                 else if (Tool == BoardTool.Connect) ConnectAt(world);
+                else if (Tool == BoardTool.Erase) { _eraseCheckpointTaken = false; EraseAt(world); }
             }
         }
         else if (tipDown && _penTipDown)
@@ -395,6 +527,7 @@ public sealed class BoardSurface : FrameworkElement
             if (Tool == BoardTool.Draw && _strokeBuilder.IsActive)
                 _strokeBuilder.Append(ToStrokePoint(ToWorld(point), pressure, ActiveNote()));
             else if (Tool == BoardTool.Select && _pointerDragging) MovePointer(point);
+            else if (Tool == BoardTool.Erase && inside) EraseAt(ToWorld(point));
             _saveTimer.Stop(); _saveTimer.Start();
         }
         else if (!tipDown && _penTipDown)
@@ -412,6 +545,15 @@ public sealed class BoardSurface : FrameworkElement
         return true;
     }
 
+    /// <summary>Raised for every pointer sample with its outcome, for the board's input log.</summary>
+    public event Action<PointerInputSource, Point, bool, bool, string>? SampleTraced;
+
+    private bool Trace(PointerInputSource source, Point point, bool tipDown, bool accepted, string outcome)
+    {
+        SampleTraced?.Invoke(source, point, tipDown, accepted, outcome);
+        return accepted;
+    }
+
     public void ReleaseMappedPen()
     {
         if (_penTipDown && _lastPenPoint is Point point)
@@ -427,7 +569,7 @@ public sealed class BoardSurface : FrameworkElement
     }
 
     private static PointerInputSource GetMouseSource(MouseEventArgs e) =>
-        e.StylusDevice?.TabletDevice?.Type == TabletDeviceType.Stylus
+        e.StylusDevice?.TabletDevice?.Type == TabletDeviceType.Stylus || PenMouseMessages.CurrentMessageIsFromPen()
             ? PointerInputSource.PromotedPenMouse
             : PointerInputSource.Mouse;
 
@@ -528,6 +670,16 @@ public sealed class BoardSurface : FrameworkElement
         InvalidateVisual();
     }
 
+    /// <summary>One undo step per eraser gesture, taken just before the first stroke it removes.</summary>
+    private void EraseAt(Point world)
+    {
+        var updated = BoardInkOperations.EraseAt(_document, new PointD(world.X, world.Y), 10 / _transform.Zoom);
+        if (ReferenceEquals(updated, _document)) return;
+        if (!_eraseCheckpointTaken) { Checkpoint(); _eraseCheckpointTaken = true; }
+        _document = updated;
+        RefreshAfterEdit();
+    }
+
     private BoardElement? Hit(Point point) => _document.Elements.LastOrDefault(el => new Rect(el.X, el.Y, el.Width, el.Height).Contains(point));
 
     private void Add(BoardElement element)
@@ -546,6 +698,43 @@ public sealed class BoardSurface : FrameworkElement
     private bool ContainsSurfacePoint(Point point) => point.X >= 0 && point.Y >= 0 && point.X <= ActualWidth && point.Y <= ActualHeight;
     private Point ClampToSurface(Point point) => new(Math.Clamp(point.X, 0, Math.Max(0, ActualWidth)), Math.Clamp(point.Y, 0, Math.Max(0, ActualHeight)));
     private static Point Center(BoardElement element) => new(element.X + element.Width / 2, element.Y + element.Height / 2);
+
+    /// <summary>Where the line from the element's center toward <paramref name="target"/> leaves its bounding box.</summary>
+    private static Point EdgePoint(BoardElement element, Point target)
+    {
+        var center = Center(element);
+        var dx = target.X - center.X;
+        var dy = target.Y - center.Y;
+        if (Math.Abs(dx) < 1e-6 && Math.Abs(dy) < 1e-6) return center;
+        var scale = Math.Min(
+            Math.Abs(dx) < 1e-6 ? double.MaxValue : element.Width / 2 / Math.Abs(dx),
+            Math.Abs(dy) < 1e-6 ? double.MaxValue : element.Height / 2 / Math.Abs(dy));
+        return new Point(center.X + dx * scale, center.Y + dy * scale);
+    }
+
+    private static void DrawArrow(DrawingContext dc, Pen pen, Brush head, Point from, Point to)
+    {
+        var direction = to - from;
+        if (direction.Length < 1) return;
+        direction.Normalize();
+        var size = 13.0;
+        var basePoint = to - direction * size;
+        var normal = new Vector(-direction.Y, direction.X) * (size * .55);
+        dc.DrawLine(pen, from, basePoint);
+        dc.DrawGeometry(head, null, Polygon(to, basePoint + normal, basePoint - normal));
+    }
+
+    private static StreamGeometry Polygon(params Point[] points)
+    {
+        var geometry = new StreamGeometry();
+        using (var context = geometry.Open())
+        {
+            context.BeginFigure(points[0], true, true);
+            for (var i = 1; i < points.Length; i++) context.LineTo(points[i], true, false);
+        }
+        geometry.Freeze();
+        return geometry;
+    }
 
     private static void DrawText(DrawingContext dc, string text, double size, Color color, Point point, bool bold = false, double width = 700, double height = 100, TextAlignment alignment = TextAlignment.Left)
     {
@@ -585,10 +774,8 @@ public sealed class BoardSurface : FrameworkElement
     private RectD WindowScreenBounds()
     {
         var window = Window.GetWindow(this);
-        if (window is null) return new RectD(0, 0, 0, 0);
-        var origin = window.PointToScreen(new Point(0, 0));
-        var dpi = VisualTreeHelper.GetDpi(window);
-        return new RectD(origin.X, origin.Y, window.ActualWidth * dpi.DpiScaleX, window.ActualHeight * dpi.DpiScaleY);
+        var area = window is null ? Rect.Empty : NativeWindowBounds.ClientArea(window);
+        return area.IsEmpty ? new RectD(0, 0, 0, 0) : new RectD(area.X, area.Y, area.Width, area.Height);
     }
 
     private void UpdateClipBounds() { if (_confinement.IsConfined) _confinement.UpdateBoardBounds(WindowScreenBounds()); }

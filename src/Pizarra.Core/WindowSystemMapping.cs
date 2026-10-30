@@ -1,6 +1,10 @@
 namespace Pizarra.Core;
 
-/// <summary>Wintab system-coordinate target rectangle, with axis direction preserved from driver defaults.</summary>
+/// <summary>
+/// WinTab target rectangle. The driver maps linearly, value = origin + t × extent, and clamps to the
+/// rectangle, so a reversed axis needs its origin on the far edge (measured on the CTL-4100WL: origin on
+/// the top edge with a negative extent pinned every packet to that edge).
+/// </summary>
 public sealed record WindowSystemMapping(int OriginX, int ExtentX, int OriginY, int ExtentY)
 {
     public static WindowSystemMapping Create(RectD bounds, bool reverseX, bool reverseY)
@@ -20,6 +24,9 @@ public sealed record WindowSystemMapping(int OriginX, int ExtentX, int OriginY, 
             reverseY ? -height : height);
     }
 
-    /// <summary>Projects normalized tablet coordinates to this mapping's screen rectangle.</summary>
-    public PointD Map(double tabletX, double tabletY) => new(OriginX + tabletX * ExtentX, OriginY + tabletY * ExtentY);
+    /// <summary>
+    /// Value the driver reports for a pen at normalized tablet coordinates: X grows to the right and
+    /// <paramref name="tabletUpY"/> grows up from the tablet's bottom edge, as WinTab measures it.
+    /// </summary>
+    public PointD Map(double tabletX, double tabletUpY) => new(OriginX + tabletX * ExtentX, OriginY + tabletUpY * ExtentY);
 }

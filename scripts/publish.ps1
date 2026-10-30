@@ -22,4 +22,4 @@ $compiler = Join-Path $env:LOCALAPPDATA 'Programs\Inno Setup 6\ISCC.exe'
 if (-not (Test-Path $compiler)) { throw 'Instala Inno Setup 6 (JRSoftware.InnoSetup) para generar el instalador.' }
 & $compiler (Join-Path $projectRoot 'installer\PizarraWorkflows.iss')
 if ($LASTEXITCODE -ne 0) { throw "ISCC terminó con código $LASTEXITCODE" }
-Write-Host "Instalador de diagnóstico listo: $(Join-Path $distDir 'Pizarra-Workflows-Diagnostics-0.2.2.exe')"
+Write-Host "Instalador de diagnóstico listo: $(Join-Path $distDir 'Pizarra-Workflows-Diagnostics-0.3.0.exe')"

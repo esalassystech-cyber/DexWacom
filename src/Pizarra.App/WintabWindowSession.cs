@@ -29,12 +29,15 @@ internal sealed class WintabWindowSession : IDisposable
     private uint _tipButtonMask;
     private WinTabMessageRouter? _messageRouter;
     private WinTabInputMapping? _activeMapping;
+    private readonly PacketYOrientation _yOrientation = new();
     private bool _disposed;
     private bool _hasReportedValidPacket;
 
     public WintabWindowSession(IntPtr windowHandle) => _windowHandle = windowHandle;
 
     public bool IsActive => _contextHandle != IntPtr.Zero;
+    public bool PacketYMirrored => _yOrientation.Mirrored;
+    public bool PacketYOrientationDecided => _yOrientation.Decided;
     public event Action<Point, double, bool, uint>? SampleReceived;
     public event Action<int, int, uint, uint, uint, uint>? RawPacketReceived;
     public event Action<bool>? ProximityChanged;
@@ -67,6 +70,7 @@ internal sealed class WintabWindowSession : IDisposable
             _messageRouter = new WinTabMessageRouter(context.lcMsgBase, _contextHandle);
             if (!WTGetA(_contextHandle, out var accepted) || !MappingMatches(accepted, _activeMapping))
                 return SetFailure("El driver no aceptó el mapeo completo de ventana · entrada WPF y mouse activos");
+            BringToTop();
 
             (_pressureMinimum, _pressureRange) = ReadPressureRange(context.lcDevice);
             StatusChanged?.Invoke("WinTab disponible · esperando lápiz (entrada básica activa)");
@@ -97,6 +101,7 @@ internal sealed class WintabWindowSession : IDisposable
             if (WTSetA(_contextHandle, ref context) && WTGetA(_contextHandle, out var accepted) && MappingMatches(accepted, mapping))
             {
                 _activeMapping = mapping;
+                BringToTop();
                 return true;
             }
             return Activate(bounds);
@@ -127,7 +132,11 @@ internal sealed class WintabWindowSession : IDisposable
             var pressure = Math.Clamp(Math.Max(0L, (long)packet.Pressure - _pressureMinimum) / (double)_pressureRange, 0, 1);
             var normalizedButtons = rawButtons & ~_tipButtonMask;
             if (tipDown) normalizedButtons |= 1;
-            SampleReceived?.Invoke(new Point(packet.X, packet.Y), pressure, tipDown, normalizedButtons);
+            var area = _activeMapping!.Packets;
+            if (!tipDown && NativeWindowBounds.CursorPosition() is Point cursor)
+                _yOrientation.Observe(packet.Y, cursor.Y, area.OriginY, area.ExtentY);
+            var screenY = _yOrientation.ToScreen(packet.Y, area.OriginY, area.ExtentY);
+            SampleReceived?.Invoke(new Point(packet.X, screenY), pressure, tipDown, normalizedButtons);
             if (!_hasReportedValidPacket)
             {
                 _hasReportedValidPacket = true;
@@ -167,6 +176,13 @@ internal sealed class WintabWindowSession : IDisposable
         CloseContext();
     }
 
+    /// <summary>The driver applies the cursor rectangle (lcSys) of the topmost system context, so keep ours on top.</summary>
+    private void BringToTop()
+    {
+        try { WTOverlap(_contextHandle, true); }
+        catch (EntryPointNotFoundException) { }
+    }
+
     private bool SetFailure(string message)
     {
         CloseContext();
@@ -198,8 +214,7 @@ internal sealed class WintabWindowSession : IDisposable
     private static WinTabInputMapping SetWindowMapping(ref LogContext context, Rect bounds)
     {
         var mapping = WinTabInputMapping.Create(new RectD(bounds.X, bounds.Y, bounds.Width, bounds.Height),
-            context.lcSysExtX < 0, context.lcSysExtY < 0,
-            context.lcOutExtX < 0, context.lcOutExtY < 0);
+            context.lcSysExtX < 0, context.lcSysExtY < 0);
         context.lcSysOrgX = mapping.Cursor.OriginX;
         context.lcSysExtX = mapping.Cursor.ExtentX;
         context.lcSysOrgY = mapping.Cursor.OriginY;
@@ -273,6 +288,8 @@ internal sealed class WintabWindowSession : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)] private static extern bool WTSetA(IntPtr contextHandle, ref LogContext context);
     [DllImport("Wintab32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)] private static extern bool WTClose(IntPtr contextHandle);
+    [DllImport("Wintab32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)] private static extern bool WTOverlap(IntPtr contextHandle, [MarshalAs(UnmanagedType.Bool)] bool toTop);
     [DllImport("Wintab32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)] private static extern bool WTPacket(IntPtr contextHandle, uint serialNumber, ref Packet packet);
 }

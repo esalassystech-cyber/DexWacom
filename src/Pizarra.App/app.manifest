@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <assemblyIdentity version="1.0.0.0" name="Pizarra.App.app"/>
+
+  <!-- PerMonitorV2 below is ignored unless the app declares Windows 10 compatibility. -->
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}" />
+    </application>
+  </compatibility>
+
+  <!--
+    WinTab and ClipCursor work in physical desktop pixels. Without PerMonitorV2 the process is
+    System DPI aware and, on a monitor whose scaling differs from the primary one (here a 4K at
+    150 % next to a 100 % ultrawide), Windows hands it virtualized coordinates, so the window
+    rectangle sent to the driver and the packet-to-canvas conversion are off by the scale ratio.
+  -->
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+      <dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true/pm</dpiAware>
+    </windowsSettings>
+  </application>
+</assembly>

@@ -1,5 +1,5 @@
 #define AppName "Pizarra Workflows"
-#define AppVersion "0.2.2"
+#define AppVersion "0.3.0"
 #define AppPublisher "Eric Salas"
 #define AppExeName "Pizarra.App.exe"
 
@@ -7,7 +7,7 @@
 AppId={{C2668132-94E8-4BA5-B2C5-1B8B5382D0A2}
 AppName={#AppName}
 AppVersion={#AppVersion}
-VersionInfoVersion=0.2.2.0
+VersionInfoVersion=0.3.0.0
 VersionInfoProductName={#AppName}
 VersionInfoDescription=Actualización de diagnóstico de Pizarra Workflows
 AppPublisher={#AppPublisher}
@@ -18,7 +18,7 @@ SetupIconFile=..\assets\pizarra-workflows.ico
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\dist
-OutputBaseFilename=Pizarra-Workflows-Diagnostics-0.2.2
+OutputBaseFilename=Pizarra-Workflows-Diagnostics-0.3.0
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -30,11 +30,44 @@ public sealed class WinTabMessageRouterTests
     [Fact]
     public void MapsPacketAndSystemCoordinatesIndependentlyToWindowBounds()
     {
-        var mapping = WinTabInputMapping.Create(new RectD(100, 50, 800, 600),
-            reverseCursorX: false, reverseCursorY: true,
-            reversePacketX: true, reversePacketY: false);
+        var mapping = WinTabInputMapping.Create(new RectD(100, 50, 800, 600), reverseCursorX: false, reverseCursorY: false);
 
-        Assert.Equal(new WindowSystemMapping(100, 800, 650, -600), mapping.Cursor);
-        Assert.Equal(new WindowSystemMapping(900, -800, 50, 600), mapping.Packets);
+        Assert.Equal(new WindowSystemMapping(100, 800, 50, 600), mapping.Cursor);
+        Assert.Equal(new WindowSystemMapping(100, 800, 50, 600), mapping.Packets);
+    }
+
+    [Fact]
+    public void TopOfTheTabletBecomesTheTopOfTheWindowAfterMirroringPacketY()
+    {
+        var mapping = WinTabInputMapping.Create(new RectD(100, 50, 800, 600), reverseCursorX: false, reverseCursorY: false);
+        var orientation = new PacketYOrientation();
+
+        var top = mapping.Packets.Map(0, 1);
+        var bottom = mapping.Packets.Map(1, 0);
+
+        Assert.Equal(50, orientation.ToScreen(top.Y, 50, 600));
+        Assert.Equal(650, orientation.ToScreen(bottom.Y, 50, 600));
+    }
+
+    [Fact]
+    public void HoverPacketsThatMatchTheCursorDirectlyTurnMirroringOff()
+    {
+        var orientation = new PacketYOrientation();
+        for (var i = 0; i < 5; i++) orientation.Observe(packetY: 120, cursorY: 118, top: 50, height: 600);
+
+        Assert.True(orientation.Decided);
+        Assert.False(orientation.Mirrored);
+        Assert.Equal(120, orientation.ToScreen(120, 50, 600));
+    }
+
+    [Fact]
+    public void HoverPacketsThatMatchTheMirroredCursorKeepMirroring()
+    {
+        var orientation = new PacketYOrientation();
+        orientation.Observe(packetY: 350, cursorY: 352, top: 50, height: 600); // middle: no vote
+        for (var i = 0; i < 5; i++) orientation.Observe(packetY: 600, cursorY: 101, top: 50, height: 600);
+
+        Assert.True(orientation.Decided);
+        Assert.True(orientation.Mirrored);
     }
 }

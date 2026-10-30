@@ -78,12 +78,31 @@ internal sealed class WacomDiagnosticsWindow : Window
         _wintab = new WintabWindowSession(hwnd) { ReadCurrentWindowBounds = SurfaceScreenBounds };
         _wintab.SampleReceived += (screenPoint, pressure, tipDown, buttons) =>
         {
-            var point = _surface.PointFromScreen(screenPoint);
-            _surface.HandleWinTab(point, pressure, tipDown, buttons);
+            if (NativeWindowBounds.ScreenToElement(_surface, screenPoint) is Point point)
+                _surface.HandleWinTab(point, pressure, tipDown, buttons);
         };
+        // Packet next to the system cursor and the target area, all in physical pixels: if the cursor follows the
+        // packet the driver applies our window mapping; if it does not, the driver ignores lcSys.
         _wintab.RawPacketReceived += (x, y, pressure, buttons, cursor, tipMask) =>
         {
-            try { _log?.WriteLine(JsonSerializer.Serialize(new { timestamp = DateTimeOffset.Now, category = "raw-packet", source = "WinTab", x, y, rawPressure = pressure, rawButtons = buttons, cursor, tipButtonMask = tipMask, focused = IsActive })); }
+            var systemCursor = NativeWindowBounds.CursorPosition();
+            var area = SurfaceScreenBounds();
+            var dpi = VisualTreeHelper.GetDpi(this);
+            try
+            {
+                _log?.WriteLine(JsonSerializer.Serialize(new
+                {
+                    timestamp = DateTimeOffset.Now, category = "raw-packet", source = "WinTab", x, y,
+                    cursorX = systemCursor?.X, cursorY = systemCursor?.Y,
+                    areaX = area.IsEmpty ? (double?)null : area.X, areaY = area.IsEmpty ? (double?)null : area.Y,
+                    areaWidth = area.IsEmpty ? (double?)null : area.Width, areaHeight = area.IsEmpty ? (double?)null : area.Height,
+                    packetInsideArea = !area.IsEmpty && area.Contains(x, y),
+                    cursorInsideArea = systemCursor is Point c && !area.IsEmpty && area.Contains(c),
+                    dpiScale = dpi.DpiScaleX,
+                    packetYMirrored = _wintab?.PacketYMirrored, packetYOrientationDecided = _wintab?.PacketYOrientationDecided,
+                    rawPressure = pressure, rawButtons = buttons, cursor, tipButtonMask = tipMask, focused = IsActive
+                }));
+            }
             catch { }
         };
         _wintab.StatusChanged += message => { _status.Text = message; WriteLog("status", "WinTab", message, 0, 0, 0, 0, true); };
@@ -114,10 +133,8 @@ internal sealed class WacomDiagnosticsWindow : Window
 
     private Rect SurfaceScreenBounds()
     {
-        if (!_surface.IsLoaded || _surface.ActualWidth < 1 || _surface.ActualHeight < 1) return Rect.Empty;
-        var origin = _surface.PointToScreen(new Point(0, 0));
-        var dpi = VisualTreeHelper.GetDpi(_surface);
-        return new Rect(origin.X, origin.Y, _surface.ActualWidth * dpi.DpiScaleX, _surface.ActualHeight * dpi.DpiScaleY);
+        if (!_surface.IsLoaded) return Rect.Empty;
+        return NativeWindowBounds.ElementArea(_surface);
     }
 
     private void WriteLog(string category, string source, string kind, double x, double y, double pressure, uint buttons, bool accepted)
@@ -135,6 +152,7 @@ internal sealed class WacomDiagnosticsWindow : Window
         private System.Windows.Shapes.Polyline? _stroke;
         private Point? _last;
         private PointerInputSource _mouseSource;
+        private bool _wintabSeen;
         public event Action<PointerInputSource, string, Point, double, uint, bool>? SampleObserved;
 
         public DiagnosticSurface()
@@ -144,7 +162,11 @@ internal sealed class WacomDiagnosticsWindow : Window
             MouseDown += MouseDownHandler; MouseMove += MouseMoveHandler; MouseUp += MouseUpHandler;
         }
 
-        public void HandleWinTab(Point point, double pressure, bool tipDown, uint buttons) => Handle(PointerInputSource.WinTab, tipDown ? "down/move" : "up", point, pressure, buttons, tipDown);
+        public void HandleWinTab(Point point, double pressure, bool tipDown, uint buttons)
+        {
+            _wintabSeen = true;
+            Handle(PointerInputSource.WinTab, tipDown ? "down/move" : "up", point, pressure, buttons, tipDown);
+        }
 
         public void CancelContact()
         {
@@ -173,7 +195,8 @@ internal sealed class WacomDiagnosticsWindow : Window
 
         private void MouseDownHandler(object sender, MouseButtonEventArgs e)
         {
-            _mouseSource = e.StylusDevice?.TabletDevice?.Type == TabletDeviceType.Stylus ? PointerInputSource.PromotedPenMouse : PointerInputSource.Mouse;
+            _mouseSource = e.StylusDevice?.TabletDevice?.Type == TabletDeviceType.Stylus || PenMouseMessages.CurrentMessageIsFromPen()
+                ? PointerInputSource.PromotedPenMouse : PointerInputSource.Mouse;
             Handle(_mouseSource, "down", e.GetPosition(this), .5, (uint)e.ChangedButton, true); CaptureMouse();
         }
 
@@ -189,7 +212,9 @@ internal sealed class WacomDiagnosticsWindow : Window
 
         private void Handle(PointerInputSource source, string kind, Point point, double pressure, uint buttons, bool tipDown)
         {
-            var accepted = _input.Accept(source, tipDown);
+            // Same rule as the board: once WinTab delivers packets, Windows Ink and pen-made mouse events are only logged.
+            var accepted = !(_wintabSeen && source is PointerInputSource.WpfPen or PointerInputSource.PromotedPenMouse)
+                && _input.Accept(source, tipDown);
             SampleObserved?.Invoke(source, kind, point, pressure, buttons, accepted);
             if (!accepted) return;
             if (tipDown)

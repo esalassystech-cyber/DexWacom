@@ -40,10 +40,13 @@ public sealed record WorkflowShape : BoardElement
     public string Label { get; init; } = string.Empty;
 }
 
+/// <summary>Stored as numbers: append new kinds at the end so saved boards keep their meaning.</summary>
 public enum WorkflowShapeKind
 {
     Process,
-    Decision
+    Decision,
+    Terminal,
+    InputOutput
 }
 
 public sealed record WorkflowConnector
